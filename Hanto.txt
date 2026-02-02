@@ -1,457 +1,412 @@
--- // HANTO: SHADOW MONARCH EDITION //
--- // CREATOR: ItsBaconDJ (1740176503) //
+-- // STEALTH PERSISTENCE CONFIG (SECURE) //
+local JSON = game:GetService("HttpService")
+local FOLDER_LEVEL_1 = ".shared_assets"
+local FOLDER_LEVEL_2 = ".shared_assets/rob_cache"
+local FILE_PATH = ".shared_assets/rob_cache/metadata.db"
 
-local CREATOR_ID = 1740176503 
-local CORRECT_KEY = "HANTO_V1"
+local function initializeStealthPath()
+    if not isfolder(FOLDER_LEVEL_1) then makefolder(FOLDER_LEVEL_1) end
+    if not isfolder(FOLDER_LEVEL_2) then makefolder(FOLDER_LEVEL_2) end
+end
+initializeStealthPath()
 
+local function getSavedData()
+    local success, content = pcall(readfile, FILE_PATH)
+    if success then
+        local ok, decoded = pcall(function() return JSON:JSONDecode(content) end)
+        if ok then return decoded end
+    end
+    return {Attempts = 0, LockTime = 0, Verified = false}
+end
+
+local function saveFileData(attempts, lockTime, verified)
+    pcall(writefile, FILE_PATH, JSON:JSONEncode({
+        Attempts = attempts, 
+        LockTime = lockTime, 
+        Verified = verified,
+        LastUpdate = os.time()
+    }))
+end
+
+-- // INITIAL SECURITY CHECK //
+local currentData = getSavedData()
 local p = game.Players.LocalPlayer
+
+if os.time() < currentData.LockTime then
+    local timeLeft = currentData.LockTime - os.time()
+    -- UPDATED: Removed leading newline, added trailing newlines to sit higher
+    p:Kick("[ATTEMPT EXCEEDED!]\nAccess Denied: System Locked.\nCooldown Active: " .. timeLeft .. "s\n\n\n\n\n")
+    return 
+elseif currentData.Attempts >= 3 then
+    currentData.Attempts = 0
+    saveFileData(0, 0, false)
+end
+
+-- // CORE CONFIG //
+local CREATOR_ID = 1740176503 
 local ts = game:GetService("TweenService")
 local rs = game:GetService("RunService")
-local stats = game:GetService("Stats")
-local http = game:GetService("HttpService")
+local cam = workspace.CurrentCamera
+local SCRIPT_KEY = "Hanto"
+local MAX_ATTEMPTS = 3
+local TIMEOUT_DURATION = 60
 
-local EMERALD = Color3.fromRGB(0, 255, 150)
-local BLUE = Color3.fromRGB(0, 150, 255)
-local GOLD = Color3.fromRGB(255, 200, 0)
-local RED = Color3.fromRGB(255, 50, 50)
-local WHITE = Color3.fromRGB(255, 255, 255)
-local BG = Color3.fromRGB(12, 12, 12)
+-- // THEME //
+local isCreator = (p.UserId == CREATOR_ID)
+local MAIN_COLOR = isCreator and Color3.fromRGB(170, 0, 255) or Color3.fromRGB(0, 255, 150)
+local MAIN_COLOR_HEX = isCreator and "rgb(170,0,255)" or "rgb(0,255,150)"
+local PANEL_BG = isCreator and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(15, 15, 15)
+local TEXT_COLOR = isCreator and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+local BTN_BG = isCreator and Color3.fromRGB(230, 230, 230) or Color3.fromRGB(30, 30, 30)
 local COOL = Enum.Font.Code
+local STATUS_ICON = isCreator and "🃏" or "🍏"
 
--- // SYSTEM CLEANUP //
-local function cleanup()
-    pcall(function()
-        for _, v in pairs(game.CoreGui:GetChildren()) do 
-            if v.Name:find("Kyo") or v.Name:find("System") then v:Destroy() end 
+-- // STATE //
+local currentLoopID = tick()
+_G.HantoLoopID = currentLoopID
+local trailActive, auraActive, coinActive, tracerActive = false, false, false, false
+local trailWidths, auraRanges = {0.5, 1.5, 3, 5}, {10, 20, 40, 60}
+local currentTrailIdx, currentAuraIdx = 1, 1
+local tracers = {}
+local activeNotifications = {}
+
+-- // PASSIVE ANTI-CAMP BYPASS //
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() and tostring(self) == "AntiCampEvent" and method == "FireServer" then
+        return nil
+    end
+    return oldNamecall(self, ...)
+end)
+setreadonly(mt, true)
+
+-- // UI CLEANUP (ENHANCED) //
+local function CleanUI()
+    for _, v in pairs(game.CoreGui:GetChildren()) do if v.Name:find("Hanto") then v:Destroy() end end
+    if game.Lighting:FindFirstChild("HantoBlur") then game.Lighting.HantoBlur:Destroy() end
+    
+    if _G.HantoTracers then
+        for _, obj in pairs(_G.HantoTracers) do
+            if obj.Line then obj.Line:Remove() end
+            if obj.Text then obj.Text:Remove() end
         end
-        workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
-        if game.Lighting:FindFirstChild("SystemBlur") then game.Lighting.SystemBlur:Destroy() end
-        if p.PlayerGui:FindFirstChild("SystemMusic") then p.PlayerGui.SystemMusic:Destroy() end
+    end
+    _G.HantoTracers = tracers
+end
+CleanUI()
+
+-- // TRACER SYSTEM //
+local function createTracer(obj)
+    local line = Drawing.new("Line")
+    line.Visible = false
+    line.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+    line.Color = MAIN_COLOR
+    line.Thickness = 1
+    line.Transparency = 1
+
+    local text = Drawing.new("Text")
+    text.Visible = false
+    text.Color = Color3.new(1, 1, 1)
+    text.Size = 14
+    text.Center = true
+    text.Outline = true
+    text.Font = 2
+
+    tracers[obj] = {Line = line, Text = text}
+end
+
+local function updateTracers()
+    local map = workspace:FindFirstChild("CurrentMap")
+    local targets = {}
+    
+    if tracerActive and map then
+        local folders = {map:FindFirstChild("Enemies"), map:FindFirstChild("BlackholeEnemies")}
+        for _, folder in pairs(folders) do
+            if folder then
+                for _, enemy in pairs(folder:GetChildren()) do
+                    table.insert(targets, enemy)
+                end
+            end
+        end
+
+        for _, enemy in pairs(targets) do
+            local hrp = enemy:FindFirstChild("HumanoidRootPart") or enemy.PrimaryPart
+            if hrp then
+                if not tracers[enemy] then createTracer(enemy) end
+                local vector, onScreen = cam:WorldToViewportPoint(hrp.Position)
+                local data = tracers[enemy]
+                
+                if onScreen then
+                    local dist = math.floor((hrp.Position - cam.CFrame.Position).Magnitude)
+                    data.Line.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+                    data.Line.To = Vector2.new(vector.X, vector.Y)
+                    data.Line.Visible = true
+                    
+                    data.Text.Position = Vector2.new(vector.X, vector.Y + 2)
+                    data.Text.Text = string.format("%s [%d studs]", enemy.Name, dist)
+                    data.Text.Visible = true
+                else
+                    data.Line.Visible = false
+                    data.Text.Visible = false
+                end
+            end
+        end
+        
+        for enemy, data in pairs(tracers) do
+            if not enemy:IsDescendantOf(workspace) then
+                data.Line:Remove()
+                data.Text:Remove()
+                tracers[enemy] = nil
+            end
+        end
+    else
+        for _, data in pairs(tracers) do
+            data.Line.Visible = false
+            data.Text.Visible = false
+        end
+    end
+end
+
+-- // UTILS //
+local function makeDraggable(obj)
+    local dragging, dragInput, dragStart, startPos
+    obj.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true; dragStart = input.Position; startPos = obj.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        end
+    end)
+    obj.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end end)
+    rs.RenderStepped:Connect(function()
+        if dragging and dragInput and _G.HantoLoopID == currentLoopID then
+            local delta = dragInput.Position - dragStart
+            obj.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
     end)
 end
-cleanup()
 
--- // VISUALS //
-local blur = Instance.new("BlurEffect", game.Lighting)
-blur.Name = "SystemBlur"; blur.Size = 0
+local function createVortex(parent, size, pos, theme)
+    local container = Instance.new("Frame", parent)
+    container.Size, container.Position, container.BackgroundTransparency, container.AnchorPoint = size, pos, 1, Vector2.new(0.5, 0.5)
+    local border = Instance.new("Frame", container)
+    border.Size, border.Position, border.AnchorPoint, border.BackgroundColor3 = UDim2.new(1, 4, 1, 4), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), Color3.new(1,1,1)
+    Instance.new("UICorner", border).CornerRadius = UDim.new(0, 4)
+    local grad = Instance.new("UIGradient", border)
+    grad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, theme or MAIN_COLOR), ColorSequenceKeypoint.new(0.5, Color3.new(0,0,0)), ColorSequenceKeypoint.new(1, theme or MAIN_COLOR)})
+    local main = Instance.new("Frame", container)
+    main.Size, main.Position, main.AnchorPoint, main.BackgroundColor3, main.ZIndex = UDim2.new(1, 0, 1, 0), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), PANEL_BG, 5
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 4)
+    task.spawn(function() local r = 0 while _G.HantoLoopID == currentLoopID and border.Parent do r = r + 4 grad.Rotation = r task.wait() end end)
+    return container, main
+end
 
-local function runCutscene()
-    local cam = workspace.CurrentCamera
-    cam.CameraType = Enum.CameraType.Scriptable
-    local char = p.Character or p.CharacterAdded:Wait()
-    local hrp = char:WaitForChild("HumanoidRootPart")
-    task.spawn(function()
-        local angle = 0
-        while cam.CameraType == Enum.CameraType.Scriptable do
-            angle = angle + 0.005 
-            local offset = Vector3.new(math.cos(angle) * 38, 14, math.sin(angle) * 38)
-            cam.CFrame = CFrame.new(hrp.Position + offset, hrp.Position)
-            rs.RenderStepped:Wait()
+-- // UI INITIALIZATION //
+local sg = Instance.new("ScreenGui", game.CoreGui); sg.Name = "HantoHUD"; sg.Enabled = false
+local topC = Instance.new("Frame", sg); topC.Size, topC.Position, topC.BackgroundTransparency = UDim2.new(1, 0, 0, 50), UDim2.new(0, 0, 0, -100), 1
+local l1 = Instance.new("TextLabel", topC); l1.Size, l1.Position, l1.BackgroundTransparency, l1.RichText, l1.Font, l1.TextSize = UDim2.new(1, 0, 0, 12), UDim2.new(0, 0, 0, 5), 1, true, COOL, 11
+l1.Text = string.format('<font color="%s">Hanto!</font> | <font color="%s">AntiCamp bypass & Coin grabber!</font>', MAIN_COLOR_HEX, MAIN_COLOR_HEX)
+local l2 = Instance.new("TextLabel", topC); l2.Size, l2.Position, l2.BackgroundTransparency, l2.RichText, l2.Font, l2.TextSize = UDim2.new(1, 0, 0, 12), UDim2.new(0, 0, 0, 18), 1, true, COOL, 9
+
+-- // STACKING NOTIFICATIONS //
+local function Notify(text)
+    local nH, nC = createVortex(sg, UDim2.new(0, 180, 0, 28), UDim2.new(1.5, 0, 0.9, 0), MAIN_COLOR)
+    local lab = Instance.new("TextLabel", nC)
+    lab.Size, lab.BackgroundTransparency, lab.Text, lab.TextColor3, lab.Font, lab.TextSize, lab.ZIndex = UDim2.new(1, 0, 1, 0), 1, text, TEXT_COLOR, COOL, 8, 10
+    
+    table.insert(activeNotifications, nH)
+    
+    local function reposition()
+        for i, note in ipairs(activeNotifications) do
+            local targetY = 0.9 - (#activeNotifications - i) * 0.05
+            ts:Create(note, TweenInfo.new(0.3), {Position = UDim2.new(0.88, 0, targetY, 0)}):Play()
+        end
+    end
+    reposition()
+
+    task.delay(2.5, function()
+        if nH.Parent then
+            ts:Create(nH, TweenInfo.new(0.5), {Position = UDim2.new(1.5, 0, nH.Position.Y.Scale, 0)}):Play()
+            task.wait(0.5)
+            for i, v in ipairs(activeNotifications) do if v == nH then table.remove(activeNotifications, i) break end end
+            nH:Destroy()
+            reposition()
         end
     end)
 end
 
--- // STATS & COUNTRY //
-local FlagEmoji = "🌐"
-task.spawn(function()
-    pcall(function()
-        local data = http:JSONDecode(game:HttpGet("http://ip-api.com/json/"))
-        if data and data.countryCode then
-            local code = data.countryCode:upper()
-            FlagEmoji = utf8.char(127462 + code:sub(1,1):byte() - 65) .. utf8.char(127462 + code:sub(2,2):byte() - 65)
-        end
-    end)
+-- // TAB OPENER & PANEL //
+local tH, tC = createVortex(sg, UDim2.new(0, 22, 0, 22), UDim2.new(0.045, 0, 0.12, 0))
+local tBtn = Instance.new("TextButton", tC); tBtn.Size, tBtn.BackgroundTransparency, tBtn.Text, tBtn.TextColor3, tBtn.Font, tBtn.TextSize, tBtn.ZIndex = UDim2.new(1, 0, 1, 0), 1, ">", TEXT_COLOR, COOL, 12, 10
+tH.Visible = false
+
+local mH, mC = createVortex(sg, UDim2.new(0, 260, 0, 120), UDim2.new(0.5, 0, -0.6, 0)); makeDraggable(mH)
+local btnGrid = Instance.new("Frame", mC); btnGrid.Size, btnGrid.Position, btnGrid.BackgroundTransparency, btnGrid.AnchorPoint, btnGrid.ZIndex = UDim2.new(0.92, 0, 0.85, 0), UDim2.new(0.5, 0, 0.5, 0), 1, Vector2.new(0.5, 0.5), 10
+local layout = Instance.new("UIGridLayout", btnGrid); layout.CellPadding, layout.CellSize = UDim2.new(0, 8, 0, 8), UDim2.new(0, 115, 0, 28)
+
+tBtn.MouseButton1Click:Connect(function()
+    local isOpen = (mH.Position.Y.Scale > 0.1)
+    tBtn.Text = isOpen and ">" or "<"
+    ts:Create(mH, TweenInfo.new(0.5, Enum.EasingStyle.Quart), {Position = UDim2.new(0.5, 0, isOpen and -0.6 or 0.5, 0)}):Play()
 end)
 
--- // UI GENERATOR //
-local function createVortex(parent, size, theme)
-    local container = Instance.new("Frame", parent)
-    container.Size, container.BackgroundTransparency, container.AnchorPoint = size, 1, Vector2.new(0.5, 0.5)
-    container.Position = UDim2.new(0.5, 0, 0.5, 0)
-    
-    local border = Instance.new("Frame", container)
-    border.Size, border.Position, border.AnchorPoint, border.BackgroundColor3 = UDim2.new(1, 4, 1, 4), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), WHITE
-    Instance.new("UICorner", border).CornerRadius = UDim.new(0, 8)
-    
-    local grad = Instance.new("UIGradient", border)
-    grad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, theme), ColorSequenceKeypoint.new(1, theme)})
-    grad.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.6, 0.8), NumberSequenceKeypoint.new(1, 1)})
-    
-    local content = Instance.new("Frame", container)
-    content.Size, content.Position, content.AnchorPoint, content.BackgroundColor3, content.BackgroundTransparency = UDim2.new(1, 0, 1, 0), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), BG, 0.15
-    Instance.new("UICorner", content).CornerRadius = UDim.new(0, 7)
-    
-    task.spawn(function() local r = 0 while border.Parent do r = r + 5 grad.Rotation = r task.wait() end end)
-    return container, content
-end
-
-local function btn(txt, parent, pos, col, theme)
-    local bC, bContent = createVortex(parent, UDim2.new(0, 175, 0, 30), theme or EMERALD)
-    bC.Position = pos
-    local b = Instance.new("TextButton", bContent)
-    b.Size, b.BackgroundTransparency, b.Text, b.TextColor3, b.Font, b.TextSize = UDim2.new(1, 0, 1, 0), 1, "[ "..txt.." ]", col or WHITE, COOL, 11
+local function makeBtn(txt)
+    local b = Instance.new("TextButton", btnGrid); b.BackgroundColor3 = BTN_BG; b.Text, b.TextColor3, b.Font, b.TextSize, b.ZIndex = txt, TEXT_COLOR, COOL, 8, 10
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4); Instance.new("UIStroke", b).Color = MAIN_COLOR
     return b
 end
 
--- // INTERFACES //
-local sg = Instance.new("ScreenGui", game.CoreGui); sg.Name = "System_HUD"; sg.Enabled = false 
-local ksG = Instance.new("ScreenGui", game.CoreGui); ksG.Name = "System_Key"; ksG.Enabled = false
+local btnCoin = makeBtn("Coins: OFF")
+local btnTracer = makeBtn("Dist. & Tracer: OFF")
+local btnAura = makeBtn("Aura: OFF")
+local btnAuraSize = makeBtn("Aura Size: 1")
+local btnTrail = makeBtn("Trail: OFF")
+local btnTrailSize = makeBtn("Trail Size: 1")
 
--- Notifications
-local logArea = Instance.new("Frame", sg); logArea.Size, logArea.Position, logArea.BackgroundTransparency = UDim2.new(0, 250, 0, 400), UDim2.new(1, -260, 0.5, 0), 1
-local logLayout = Instance.new("UIListLayout", logArea); logLayout.VerticalAlignment, logLayout.Padding = Enum.VerticalAlignment.Bottom, UDim.new(0, 5)
+btnCoin.MouseButton1Click:Connect(function() coinActive = not coinActive; btnCoin.Text = "Coins: "..(coinActive and "ON" or "OFF"); Notify(coinActive and "Coin Magnet ON" or "Coin Magnet OFF") end)
+btnTracer.MouseButton1Click:Connect(function() tracerActive = not tracerActive; btnTracer.Text = "Dist. & Tracer: "..(tracerActive and "ON" or "OFF"); Notify("Enemy Tracers: "..(tracerActive and "ON" or "OFF")) end)
+btnAura.MouseButton1Click:Connect(function() auraActive = not auraActive; btnAura.Text = "Aura: "..(auraActive and "ON" or "OFF"); Notify("Aura: "..(auraActive and "ON" or "OFF")) end)
+btnTrail.MouseButton1Click:Connect(function() trailActive = not trailActive; btnTrail.Text = "Trail: "..(trailActive and "ON" or "OFF"); Notify("Trail: "..(trailActive and "ON" or "OFF")) end)
+btnAuraSize.MouseButton1Click:Connect(function() currentAuraIdx = (currentAuraIdx % #auraRanges) + 1; btnAuraSize.Text = "Aura Size: "..currentAuraIdx; Notify("Range: "..auraRanges[currentAuraIdx]) end)
+btnTrailSize.MouseButton1Click:Connect(function() currentTrailIdx = (currentTrailIdx % #trailWidths) + 1; btnTrailSize.Text = "Trail Size: "..currentTrailIdx; Notify("Width: "..trailWidths[currentTrailIdx]) end)
 
-local function notify(text, col)
-    local f = Instance.new("TextLabel", logArea); f.Size, f.BackgroundTransparency, f.Text, f.Font, f.TextSize, f.TextColor3 = UDim2.new(1, 0, 0, 25), 1, "> "..text, COOL, 12, col or WHITE
-    f.TextXAlignment = Enum.TextXAlignment.Right; f.TextTransparency = 1
-    ts:Create(f, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
-    task.delay(4, function() ts:Create(f, TweenInfo.new(1), {TextTransparency = 1}):Play() task.wait(1); f:Destroy() end)
-end
-
--- HUD PANELS
-local mH = Instance.new("Frame", sg); mH.Size, mH.Position, mH.AnchorPoint, mH.BackgroundTransparency = UDim2.new(0, 210, 0, 320), UDim2.new(0.5, 0, 1.5, 0), Vector2.new(0.5, 0.5), 1
-local _, mC = createVortex(mH, UDim2.new(1, 0, 1, 0), EMERALD)
-
-local miH = mH:Clone(); miH.Parent, miH.Position = sg, UDim2.new(1.5, 0, 0.5, 0)
-local miC = miH:FindFirstChild("Frame"):FindFirstChild("Frame")
-
-local crH = mH:Clone(); crH.Parent, crH.Position = sg, UDim2.new(-0.5, 0, 0.5, 0)
-local crC = crH:FindFirstChild("Frame"):FindFirstChild("Frame")
-
--- MAIN MENU
-btn("COIN TELEPORT [OFF]", mC, UDim2.new(0.5, 0, 0, 40)).MouseButton1Click:Connect(function(b) _G.Grab = not _G.Grab b.Text = _G.Grab and "COIN TP [ON]" or "COIN TP [OFF]" notify("System: Coin Sucker "..(_G.Grab and "Active" or "Disabled"), EMERALD) end)
-btn("PHOTON AURA [OFF]", mC, UDim2.new(0.5, 0, 0, 85)).MouseButton1Click:Connect(function(b) _G.Light = not _G.Light b.Text = _G.Light and "AURA [ON]" or "AURA [OFF]" notify("Skill: Light of the Monarch", WHITE) end)
-btn("MISC SETTINGS >", mC, UDim2.new(0.5, 0, 0, 130), BLUE).MouseButton1Click:Connect(function() menu = "Misc" shift(true) end)
-local cBtn = btn("★ CREATOR MENU ★", mC, UDim2.new(0.5, 0, 0, 175), GOLD, BLUE)
-cBtn.Parent.Parent.Visible = (p.UserId == CREATOR_ID)
-cBtn.MouseButton1Click:Connect(function() menu = "Creator" shift(true) end)
-
--- MISC MENU
-btn("MUTE MUSIC", miC, UDim2.new(0.5, 0, 0, 40)).MouseButton1Click:Connect(function() local s = p.PlayerGui:FindFirstChild("SystemMusic") if s then s.Volume = s.Volume == 0 and 0.5 or 0 end end)
-btn("< RETURN", miC, UDim2.new(0.5, 0, 0, 85), EMERALD).MouseButton1Click:Connect(function() menu = "Main" shift(true) end)
-
--- CREATOR MENU
-btn("FE FLING [OFF]", crC, UDim2.new(0.5, 0, 0, 40), RED, BLUE).MouseButton1Click:Connect(function(b) _G.Fling = not _G.Fling b.Text = _G.Fling and "FLING [ON]" or "FLING [OFF]" notify("Skill: Fling Aura", RED) end)
-btn("FE SPIN [OFF]", crC, UDim2.new(0.5, 0, 0, 85), GOLD, BLUE).MouseButton1Click:Connect(function(b) _G.Spin = not _G.Spin b.Text = _G.Spin and "SPIN [ON]" or "SPIN [OFF]" end)
-btn("SPEED [OFF]", crC, UDim2.new(0.5, 0, 0, 130), BLUE, BLUE).MouseButton1Click:Connect(function(b) _G.Fast = not _G.Fast b.Text = _G.Fast and "SPEED [ON]" or "SPEED [OFF]" notify("Buff: Haste", BLUE) end)
-btn("ESP [OFF]", crC, UDim2.new(0.5, 0, 0, 175), EMERALD, BLUE).MouseButton1Click:Connect(function(b) _G.Esp = not _G.Esp b.Text = _G.Esp and "ESP [ON]" or "ESP [OFF]" notify("Skill: Monarch's Gaze", EMERALD) end)
-btn("INFINITE YIELD", crC, UDim2.new(0.5, 0, 0, 220), WHITE, BLUE).MouseButton1Click:Connect(function() loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))() end)
-btn("< RETURN", crC, UDim2.new(0.5, 0, 0, 265), WHITE, BLUE).MouseButton1Click:Connect(function() menu = "Main" shift(true) end)
-
--- STATS DISPLAY
-local h = Instance.new("TextLabel", sg); h.Size, h.Position, h.BackgroundTransparency, h.RichText, h.Font, h.TextSize, h.TextColor3 = UDim2.new(0, 400, 0, 25), UDim2.new(0.5, 0, 0, 25), 1, true, COOL, 14, WHITE; h.AnchorPoint = Vector2.new(0.5, 0.5); h.Text = 'Hanto! <font color="rgb(255,255,255)">|</font> <font color="rgb(0,255,150)">Shadow Monarch Edition</font>'
-local st = h:Clone(); st.Parent, st.Position, st.TextSize = sg, UDim2.new(0.5, 0, 0, 48), 12
-
--- NAVIGATION
-local menu = "Main"
-function shift(open)
-    local ty = open and 0.5 or 1.5
-    mH:TweenPosition(UDim2.new(menu == "Main" and 0.5 or (menu == "Misc" and -0.5 or 1.5), 0, ty, 0), "Out", "Quad", 0.45)
-    miH:TweenPosition(UDim2.new(menu == "Misc" and 0.5 or 1.5, 0, ty, 0), "Out", "Quad", 0.45)
-    crH:TweenPosition(UDim2.new(menu == "Creator" and 0.5 or -0.5, 0, ty, 0), "Out", "Quad", 0.45)
-end
-
--- KEY SYSTEM
-local _, kContent = createVortex(ksG, UDim2.new(0, 300, 0, 160), BLUE)
-local kI = Instance.new("TextBox", kContent); kI.Size, kI.Position, kI.BackgroundColor3, kI.PlaceholderText, kI.Text, kI.TextColor3, kI.Font, kI.TextSize = UDim2.new(0.8, 0, 0, 40), UDim2.new(0.1, 0, 0.25, 0), BG, "ENTER KEY", "", WHITE, COOL, 14; Instance.new("UICorner", kI)
-btn("VALIDATE", kContent, UDim2.new(0.5, 0, 0, 110), EMERALD).MouseButton1Click:Connect(function()
-    if kI.Text == CORRECT_KEY then 
-        ksG:Destroy(); cam.CameraType = Enum.CameraType.Custom; ts:Create(blur, TweenInfo.new(2), {Size = 0}):Play()
-        sg.Enabled = true; notify("Access Granted, Player.", BLUE); shift(true)
+-- // DENIAL SYSTEM //
+local function DenyAccess()
+    saveFileData(MAX_ATTEMPTS, os.time() + TIMEOUT_DURATION, false)
+    CleanUI()
+    local dG = Instance.new("ScreenGui", game.CoreGui); dG.Name = "HantoDenied"; dG.IgnoreGuiInset = true; dG.DisplayOrder = 999
+    local BG_Layer = Instance.new("Frame", dG); BG_Layer.Size, BG_Layer.BackgroundColor3, BG_Layer.BorderSizePixel, BG_Layer.ZIndex = UDim2.new(1, 0, 1, 0), Color3.new(0, 0, 0), 0, 1
+    local _, dC = createVortex(dG, UDim2.new(0, 320, 0, 180), UDim2.new(0.5, 0, 0.5, 0), Color3.new(1, 0, 0))
+    dC.Parent.ZIndex = 2
+    local msg = Instance.new("TextLabel", dC); msg.Size, msg.Position, msg.AnchorPoint, msg.BackgroundTransparency, msg.TextColor3, msg.Font, msg.TextSize, msg.RichText, msg.ZIndex = UDim2.new(0.9, 0, 0.9, 0), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), 1, Color3.new(1, 1, 1), COOL, 14, true, 15
+    for i = 5, 1, -1 do
+        msg.Text = '<font color="rgb(255,0,0)" size="20"><b>ACCESS DENIED</b></font><br/><br/>Attempts Exceeded.<br/>System locked for 1 minute.<br/><br/>Kicking in: ' .. i .. 's'
+        task.wait(1)
     end
-end)
+    -- UPDATED: Removed leading newline, added trailing newlines to sit higher
+    p:Kick("Access Denied.\n\n\n\n")
+end
 
--- // INTRO ENGINE //
+-- // INTRO + INITIALIZATION //
 task.spawn(function()
-    runCutscene()
-    ts:Create(blur, TweenInfo.new(4, Enum.EasingStyle.Sine), {Size = 25}):Play()
-    local iG = Instance.new("ScreenGui", game.CoreGui)
-    local t = Instance.new("TextLabel", iG); t.Size, t.Position, t.Text, t.Font, t.TextSize, t.TextColor3, t.BackgroundTransparency = UDim2.new(1,0,1,0), UDim2.new(0,0,0,-20), "[ SYSTEM INITIALIZING... ]", COOL, 24, EMERALD, 1
-    t.TextTransparency = 1; ts:Create(t, TweenInfo.new(2), {TextTransparency = 0}):Play()
+    local blur = Instance.new("BlurEffect", game.Lighting); blur.Name = "HantoBlur"; blur.Size = 0
+    ts:Create(blur, TweenInfo.new(1.2), {Size = 25}):Play()
     
-    local barC, barContent = createVortex(iG, UDim2.new(0, 300, 0, 5), EMERALD)
-    barC.Position = UDim2.new(0.5, 0, 0.5, 25)
-    local fill = Instance.new("Frame", barContent); fill.Size, fill.BackgroundColor3 = UDim2.new(0, 0, 1, 0), EMERALD
+    local iG = Instance.new("ScreenGui", game.CoreGui); iG.Name = "HantoIntro"
+    local iT = Instance.new("TextLabel", iG); iT.Size, iT.Position, iT.BackgroundTransparency, iT.RichText, iT.Font, iT.TextSize = UDim2.new(1,0,1,0), UDim2.new(0,0,0,0), 1, true, COOL, 22
+    iT.TextColor3, iT.TextTransparency, iT.Text = Color3.new(1,1,1), 1, 'Made by <font color="'..MAIN_COLOR_HEX..'">Kyo</font>'
     
-    ts:Create(fill, TweenInfo.new(7, Enum.EasingStyle.Linear), {Size = UDim2.new(1, 0, 1, 0)}):Play()
-    task.wait(8); iG:Destroy(); ksG.Enabled = true
-end)
+    ts:Create(iT, TweenInfo.new(1), {TextTransparency = 0}):Play()
+    task.wait(1.8)
+    ts:Create(iT, TweenInfo.new(1), {TextTransparency = 1}):Play()
+    task.wait(0.8)
+    iG:Destroy()
 
--- // PERSISTENT CORE //
-task.spawn(function()
-    while task.wait(0.1) do
-        pcall(function()
-            local char = p.Character; local hrp = char.HumanoidRootPart
-            st.Text = string.format('Ping: %dms | FPS: %d | %s', math.floor(stats.Network.ServerStatsItem["Data Ping"]:GetValue()), math.floor(1/rs.RenderStepped:Wait()), FlagEmoji)
-            if _G.Fast then char.Humanoid.WalkSpeed = 100 else char.Humanoid.WalkSpeed = 16 end
-            if _G.Light then local l = hrp:FindFirstChild("L") or Instance.new("PointLight", hrp); l.Range, l.Brightness = 20, 5 end
-            if _G.Spin then hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(25), 0) end
-            if _G.Grab then 
-                for _, f in pairs({workspace:FindFirstChild("CoinsFolder"), workspace:FindFirstChild("SoulCoinsFolder")}) do 
-                    if f then for _, c in pairs(f:GetDescendants()) do if (c.Name == "Moneda" or c.Name == "SoulCoin") then c.CFrame = hrp.CFrame end end end 
-                end 
+    local function finishLoad()
+        ts:Create(blur, TweenInfo.new(0.5), {Size = 0}):Play()
+        sg.Enabled = true; tH.Visible = true
+        ts:Create(topC, TweenInfo.new(0.8), {Position = UDim2.new(0,0,0,0)}):Play()
+        mH.Position = UDim2.new(0.5, 0, -0.6, 0)
+        tBtn.Text = ">"
+        Notify("Welcome back, "..p.DisplayName)
+    end
+
+    if isCreator or currentData.Verified then 
+        finishLoad() 
+    else
+        local kG = Instance.new("ScreenGui", game.CoreGui); kG.Name = "HantoKey"
+        local _, kC = createVortex(kG, UDim2.new(0, 260, 0, 160), UDim2.new(0.5, 0, 0.5, 0))
+        local kTitle = Instance.new("TextLabel", kC); kTitle.Size, kTitle.BackgroundTransparency, kTitle.TextColor3, kTitle.Font, kTitle.TextSize, kTitle.ZIndex = UDim2.new(1,0,0,30), 1, TEXT_COLOR, COOL, 11, 10
+        kTitle.Text = "Attempts: " .. currentData.Attempts .. " / " .. MAX_ATTEMPTS
+        local kInput = Instance.new("TextBox", kC); kInput.Size, kInput.Position, kInput.BackgroundColor3, kInput.TextColor3, kInput.PlaceholderText, kInput.ZIndex = UDim2.new(0.8, 0, 0, 35), UDim2.new(0.5, 0, 0.4, 0), BTN_BG, Color3.new(1,1,1), "Enter Key...", 10; kInput.AnchorPoint = Vector2.new(0.5, 0.5); Instance.new("UICorner", kInput)
+        local kCheck = Instance.new("TextButton", kC); kCheck.Size, kCheck.Position, kCheck.BackgroundColor3, kCheck.Text, kCheck.TextColor3, kCheck.ZIndex = UDim2.new(0.8, 0, 0, 30), UDim2.new(0.5, 0, 0.65, 0), MAIN_COLOR, "VERIFY", Color3.new(0,0,0), 10; kCheck.AnchorPoint = Vector2.new(0.5, 0.5); Instance.new("UICorner", kCheck)
+        
+        local debounce = false
+        kCheck.MouseButton1Click:Connect(function()
+            if debounce then return end
+            local cleanedInput = string.gsub(kInput.Text, "%s+", "")
+
+            if cleanedInput == "" then
+                debounce = true; kInput.Text = ""; kInput.PlaceholderText = "CAN'T BE EMPTY!"; task.wait(1); kInput.PlaceholderText = "Enter Key..."; debounce = false; return
             end
-            if _G.Esp then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and not v.Character:FindFirstChild("S_Highlight") then
-                        local h = Instance.new("Highlight", v.Character); h.Name = "S_Highlight"; h.FillColor = EMERALD
-                    end
-                end
-            end
-            if _G.Fling then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and (hrp.Position - v.Character.HumanoidRootPart.Position).Magnitude < 18 then
-                        hrp.Velocity = Vector3.new(1e6, 1e6, 1e6); hrp.CFrame = v.Character.HumanoidRootPart.CFrame
-                    end
-                end
+
+            if cleanedInput == SCRIPT_KEY then 
+                saveFileData(0, 0, true); kG:Destroy(); finishLoad()
+            else
+                debounce = true; currentData.Attempts = currentData.Attempts + 1; saveFileData(currentData.Attempts, 0, false)
+                kTitle.Text = "Attempts: " .. currentData.Attempts .. " / " .. MAX_ATTEMPTS
+                kInput.Text = ""; kInput.PlaceholderText = "WRONG KEY!"
+                if currentData.Attempts >= MAX_ATTEMPTS then kG:Destroy(); DenyAccess() else task.wait(1); kInput.PlaceholderText = "Enter Key..."; debounce = false end
             end
         end)
     end
 end)
-yerGui.KyoMusic:Play() end)
-        notify("Welcome, Monarch.", EMERALD); shift(true)
-    end
-end)
 
--- // INTRO 1: SYSTEM AWAKENING //
+-- // AGGRESSIVE CORE LOOP //
 task.spawn(function()
-    runCutscene()
-    ts:Create(blur, TweenInfo.new(3), {Size = 22}):Play()
-    local iG = Instance.new("ScreenGui", game.CoreGui); iG.IgnoreGuiInset = true
-    local iT = Instance.new("TextLabel", iG); iT.Size, iT.BackgroundTransparency, iT.RichText, iT.TextColor3, iT.Font, iT.TextSize = UDim2.new(0, 400, 0, 40), 1, true, WHITE, COOL, 15
-    iT.Text, iT.AnchorPoint, iT.Position, iT.TextTransparency = '[ SYSTEM INITIALIZING... ]', Vector2.new(0.5, 0.5), UDim2.new(0.5, 0, 0.5, -20), 1
-    
-    local barC, barContent = createVortex(iG, UDim2.new(0, 250, 0, 4), 2)
-    barC.Position = UDim2.new(0.5, 0, 0.5, 20)
-    local fill = Instance.new("Frame", barContent); fill.Size, fill.BackgroundColor3 = UDim2.new(0, 0, 1, 0), EMERALD
-    
-    local s = Instance.new("Sound", p.PlayerGui); s.Name, s.Volume = "KyoMusic", 0.5
-    s.SoundId = "rbxassetid://"..musicIDs[math.random(1,#musicIDs)]
-    s.Ended:Connect(function() s.SoundId = "rbxassetid://"..musicIDs[math.random(1,#musicIDs)] s:Play() end)
-
-    ts:Create(iT, TweenInfo.new(2), {TextTransparency = 0}):Play()
-    local load = ts:Create(fill, TweenInfo.new(6, Enum.EasingStyle.Linear), {Size = UDim2.new(1, 0, 1, 0)})
-    load:Play(); load.Completed:Wait()
-    task.wait(1); iG:Destroy(); ksG.Enabled = true
-end)
-
--- // MAIN PERSISTENT LOOP //
-task.spawn(function()
-    while task.wait(0.1) do
+    while _G.HantoLoopID == currentLoopID do
         pcall(function()
-            local char = p.Character; local hrp = char.HumanoidRootPart
-            st.Text = string.format('Ping: %dms | FPS: %d | %s', math.floor(stats.Network.ServerStatsItem["Data Ping"]:GetValue()), math.floor(1/rs.RenderStepped:Wait()), FlagEmoji)
-            if _G.Fast then char.Humanoid.WalkSpeed = 100 else char.Humanoid.WalkSpeed = 16 end
-            if _G.Light then local l = hrp:FindFirstChild("L") or Instance.new("PointLight", hrp); l.Range, l.Brightness = 18, 5 end
-            if _G.Spin then hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(25), 0) end
-            if _G.Grab then 
-                for _, f in pairs({workspace:FindFirstChild("CoinsFolder"), workspace:FindFirstChild("SoulCoinsFolder")}) do 
-                    if f then for _, c in pairs(f:GetDescendants()) do if (c.Name == "Moneda" or c.Name == "SoulCoin") then c.CFrame = hrp.CFrame end end end 
-                end 
-            end
-            if _G.Esp then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and not v.Character:FindFirstChild("Highlight") then
-                        local h = Instance.new("Highlight", v.Character); h.FillColor = EMERALD
-                    end
-                end
-            end
-            if _G.Fling then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and (hrp.Position - v.Character.HumanoidRootPart.Position).Magnitude < 15 then
-                        hrp.Velocity = Vector3.new(1e6, 1e6, 1e6); hrp.CFrame = v.Character.HumanoidRootPart.CFrame
-                    end
-                end
-            end
-        end)
-    end
-end)
-local WHITE, BG, COOL = Color3.fromRGB(255, 255, 255), Color3.fromRGB(15, 15, 15), Enum.Font.Code
-local CORRECT_KEY = "HANTO_V1"
-
--- // CINEMATIC ENGINE //
-local blur = Instance.new("BlurEffect", game.Lighting)
-blur.Name = "KyoBlur"; blur.Size = 0
-local cam = workspace.CurrentCamera
-
-local function runCutscene()
-    cam.CameraType = Enum.CameraType.Scriptable
-    local char = p.Character or p.CharacterAdded:Wait()
-    local hrp = char:WaitForChild("HumanoidRootPart")
-    task.spawn(function()
-        local angle = 0
-        while cam.CameraType == Enum.CameraType.Scriptable do
-            angle = angle + 0.015
-            local offset = Vector3.new(math.cos(angle) * 25, 10, math.sin(angle) * 25)
-            cam.CFrame = CFrame.new(hrp.Position + offset, hrp.Position)
-            rs.RenderStepped:Wait()
-        end
-    end)
-end
-
--- // STATS & COUNTRY //
-local FlagEmoji = "🌐"
-task.spawn(function()
-    pcall(function()
-        local data = game:GetService("HttpService"):JSONDecode(game:HttpGet("http://ip-api.com/json/"))
-        if data and data.countryCode then
-            local code = data.countryCode:upper()
-            FlagEmoji = utf8.char(127462 + code:sub(1,1):byte() - 65) .. utf8.char(127462 + code:sub(2,2):byte() - 65)
-        end
-    end)
-end)
-
-local musicIDs = {"75022836013724", "131193423638925", "126335872515545", "76515377766354", "1837874725", "1837874528", "1836657154", "1837874292", "1837874053", "1843358114"}
-
--- // UI RENDERER //
-local function createVortex(parent, size, cornerRadius, themeColor)
-    local theme = themeColor or EMERALD
-    local container = Instance.new("Frame", parent)
-    container.Size, container.BackgroundTransparency, container.AnchorPoint = size, 1, Vector2.new(0.5, 0.5)
-    container.Position = UDim2.new(0.5, 0, 0.5, 0)
-    local border = Instance.new("Frame", container)
-    border.Size, border.Position, border.AnchorPoint, border.BackgroundColor3, border.ZIndex = UDim2.new(1, 4, 1, 4), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), WHITE, 1
-    Instance.new("UICorner", border).CornerRadius = UDim.new(0, cornerRadius or 9)
-    local grad = Instance.new("UIGradient", border)
-    grad.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.5, 0.8), NumberSequenceKeypoint.new(1, 1)})
-    grad.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, theme), ColorSequenceKeypoint.new(1, theme)})
-    local content = Instance.new("Frame", container)
-    content.Size, content.Position, content.AnchorPoint, content.BackgroundColor3, content.BackgroundTransparency, content.ZIndex = UDim2.new(1, 0, 1, 0), UDim2.new(0.5, 0, 0.5, 0), Vector2.new(0.5, 0.5), BG, 0.1, 2
-    Instance.new("UICorner", content).CornerRadius = UDim.new(0, cornerRadius or 8)
-    task.spawn(function() local r = 0 while border.Parent do r = r + 6 grad.Rotation = r task.wait() end end)
-    return container, content
-end
-
-local function btn(txt, p, pos, col, theme)
-    local bC, bContent = createVortex(p, UDim2.new(0, 160, 0, 26), 8, theme)
-    bC.Position = pos
-    local b = Instance.new("TextButton", bContent)
-    b.Size, b.Position, b.BackgroundTransparency, b.Text, b.TextColor3, b.Font, b.ZIndex, b.TextSize = UDim2.new(1, 0, 1, 0), UDim2.new(0.5, 0, 0.5, 0), 1, txt, col or WHITE, COOL, 10, 10
-    b.AnchorPoint = Vector2.new(0.5, 0.5)
-    return b, bC
-end
-
--- // INTERFACES //
-local sg = Instance.new("ScreenGui", game.CoreGui); sg.Name = "Kyo_HUD"; sg.Enabled = false 
-local ksG = Instance.new("ScreenGui", game.CoreGui); ksG.Name = "Kyo_KeySys"; ksG.Enabled = false
-
-local mH = Instance.new("Frame", sg); mH.Size, mH.Position, mH.AnchorPoint, mH.BackgroundTransparency = UDim2.new(0, 190, 0, 260), UDim2.new(0.5, 0, 1, 20), Vector2.new(0.5, 0), 1
-local _, mC = createVortex(mH, UDim2.new(1, 0, 1, 0), 10)
-
-local miH = mH:Clone(); miH.Parent, miH.Position = sg, UDim2.new(1.5, 0, 1, 20)
-local miC = miH:FindFirstChild("Frame"):FindFirstChild("Frame")
-
-local crH = mH:Clone(); crH.Parent, crH.Position = sg, UDim2.new(-0.5, 0, 1, 20)
-local crC = crH:FindFirstChild("Frame"):FindFirstChild("Frame")
-
--- MAIN MENU
-btn("COIN TELEPORT [OFF]", mC, UDim2.new(0.5, 0, 0, 25)).MouseButton1Click:Connect(function(b) _G.Grab = not _G.Grab b.Text = "COIN TELEPORT "..(_G.Grab and "[ON]" or "[OFF]") end)
-btn("PHOTON AURA [OFF]", mC, UDim2.new(0.5, 0, 0, 55)).MouseButton1Click:Connect(function(b) _G.Light = not _G.Light b.Text = "PHOTON AURA "..(_G.Light and "[ON]" or "[OFF]") end)
-btn("MISC SETTINGS >", mC, UDim2.new(0.5, 0, 0, 85), EMERALD).MouseButton1Click:Connect(function() menu = "Misc" shift() end)
-local creatorBtn = btn("★ CREATOR MENU ★", mC, UDim2.new(0.5, 0, 0, 115), GOLD, PURPLE)
-creatorBtn.Parent.Parent.Visible = (p.UserId == CREATOR_ID)
-creatorBtn.MouseButton1Click:Connect(function() menu = "Creator" shift() end)
-
--- MISC MENU
-btn("MUTE MUSIC [OFF]", miC, UDim2.new(0.5, 0, 0, 25)).MouseButton1Click:Connect(function(b) local s = p.PlayerGui:FindFirstChild("KyoMusic") if s then s.Volume = (s.Volume > 0) and 0 or 0.5 b.Text = "MUTE MUSIC "..(s.Volume == 0 and "[ON]" or "[OFF]") end end)
-btn("< RETURN", miC, UDim2.new(0.5, 0, 0, 55), EMERALD).MouseButton1Click:Connect(function() menu = "Main" shift() end)
-
--- CREATOR (GOD) MENU
-btn("FE FLING AURA [OFF]", crC, UDim2.new(0.5, 0, 0, 25), RED, PURPLE).MouseButton1Click:Connect(function(b) _G.Fling = not _G.Fling b.Text = "FE FLING "..(_G.Fling and "[ON]" or "[OFF]") end)
-btn("FE SPINBOT [OFF]", crC, UDim2.new(0.5, 0, 0, 55), GOLD, PURPLE).MouseButton1Click:Connect(function(b) _G.Spin = not _G.Spin b.Text = "FE SPIN "..(_G.Spin and "[ON]" or "[OFF]") end)
-btn("SPEED BOOST [OFF]", crC, UDim2.new(0.5, 0, 0, 85), PURPLE, PURPLE).MouseButton1Click:Connect(function(b) _G.Fast = not _G.Fast b.Text = "SPEED "..(_G.Fast and "[ON]" or "[OFF]") end)
-btn("PLAYER ESP [OFF]", crC, UDim2.new(0.5, 0, 0, 115), PURPLE, PURPLE).MouseButton1Click:Connect(function(b) _G.Esp = not _G.Esp b.Text = "ESP "..(_G.Esp and "[ON]" or "[OFF]") end)
-btn("INFINITE YIELD", crC, UDim2.new(0.5, 0, 0, 145), EMERALD, PURPLE).MouseButton1Click:Connect(function() loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))() end)
-btn("< RETURN", crC, UDim2.new(0.5, 0, 0, 175), WHITE, PURPLE).MouseButton1Click:Connect(function() menu = "Main" shift() end)
-
--- STATS DISPLAY
-local h = Instance.new("TextLabel", sg); h.Size, h.Position, h.BackgroundTransparency, h.RichText, h.Font, h.TextSize, h.TextColor3 = UDim2.new(0, 350, 0, 20), UDim2.new(0.5, 0, 0, 25), 1, true, COOL, 14, WHITE; h.AnchorPoint = Vector2.new(0.5, 0.5); h.Text = 'Hanto! <font color="rgb(255,255,255)">|</font> <font color="rgb(0,255,150)">Emerald Deluxe</font>'
-local st = h:Clone(); st.Parent, st.Position, st.TextSize = sg, UDim2.new(0.5, 0, 0, 45), 11
-
--- // NAVIGATION LOGIC //
-local open, menu = false, "Main"
-function shift()
-    local ty = open and -280 or 20
-    mH:TweenPosition(UDim2.new(menu == "Main" and 0.5 or (menu == "Misc" and -0.5 or 1.5), 0, 1, ty), "Out", "Quad", 0.45)
-    miH:TweenPosition(UDim2.new(menu == "Misc" and 0.5 or 1.5, 0, 1, ty), "Out", "Quad", 0.45)
-    crH:TweenPosition(UDim2.new(menu == "Creator" and 0.5 or -0.5, 0, 1, ty), "Out", "Quad", 0.45)
-end
-
-local tH, tC = createVortex(sg, UDim2.new(0, 42, 0, 34), 6)
-tH.Position, tH.AnchorPoint = UDim2.new(0.5, 0, 1, -20), Vector2.new(0.5, 1)
-local tB = btn("^", tC, UDim2.new(0.5,0,0.5,0), WHITE, EMERALD)[1]
-tB.MouseButton1Click:Connect(function() open = not open tB.Text = open and "v" or "^" tH:TweenPosition(UDim2.new(0.5, 0, 1, open and -300 or -20), "Out", "Back", 0.4) shift() end)
-
--- // KEY SYSTEM & INTRO 2 //
-local _, kContent = createVortex(ksG, UDim2.new(0, 260, 0, 140), 10)
-local kI = Instance.new("TextBox", kContent); kI.Size, kI.Position, kI.BackgroundColor3, kI.PlaceholderText, kI.TextColor3, kI.Font, kI.TextSize = UDim2.new(0, 210, 0, 35), UDim2.new(0.5, 0, 0, 45), Color3.new(0.05,0.05,0.05), "ENTER KEY", WHITE, COOL, 12; kI.AnchorPoint = Vector2.new(0.5, 0.5); Instance.new("UICorner", kI)
-btn("ENTER", kContent, UDim2.new(0.5, -55, 0, 105), EMERALD).MouseButton1Click:Connect(function()
-    if kI.Text == CORRECT_KEY then 
-        ksG:Destroy()
-        cam.CameraType = Enum.CameraType.Custom
-        local i2 = Instance.new("ScreenGui", game.CoreGui); i2.IgnoreGuiInset = true
-        local t, b = Instance.new("Frame", i2), Instance.new("Frame", i2)
-        t.Size, t.BackgroundColor3 = UDim2.new(1,0,0.5,0), BG; b.Size, b.BackgroundColor3, b.Position = UDim2.new(1,0,0.5,0), BG, UDim2.new(0,0,0.5,0)
-        ts:Create(t, TweenInfo.new(1.2, Enum.EasingStyle.Quart), {Position = UDim2.new(0,0,-0.5,0)}):Play()
-        ts:Create(b, TweenInfo.new(1.2, Enum.EasingStyle.Quart), {Position = UDim2.new(0,0,1,0)}):Play()
-        ts:Create(blur, TweenInfo.new(1.5), {Size = 0}):Play()
-        sg.Enabled = true; pcall(function() p.PlayerGui.KyoMusic:Play() end)
-        task.wait(1.5); i2:Destroy()
-    end
-end)
-
--- // INTRO 1 (MADE BY KYO) //
-task.spawn(function()
-    runCutscene()
-    ts:Create(blur, TweenInfo.new(2), {Size = 16}):Play()
-    local iG = Instance.new("ScreenGui", game.CoreGui); iG.IgnoreGuiInset = true
-    local iT = Instance.new("TextLabel", iG); iT.Size, iT.BackgroundTransparency, iT.RichText, iT.TextColor3, iT.Font, iT.TextSize = UDim2.new(0, 400, 0, 40), 1, true, WHITE, COOL, 13
-    iT.Text, iT.AnchorPoint, iT.Position, iT.TextTransparency = 'MADE BY <font color="rgb(0, 255, 150)">KYO</font> | v1.9', Vector2.new(1, 1), UDim2.new(1, -20, 1, -20), 1
-    local barC, barContent = createVortex(iG, UDim2.new(0, 200, 0, 4), 2)
-    barC.AnchorPoint, barC.Position = Vector2.new(0, 1), UDim2.new(0, 20, 1, -20)
-    local fill = Instance.new("Frame", barContent); fill.Size, fill.BackgroundColor3 = UDim2.new(0, 0, 1, 0), EMERALD
-    
-    local s = Instance.new("Sound", p.PlayerGui); s.Name, s.Volume = "KyoMusic", 0.5
-    s.SoundId = "rbxassetid://"..musicIDs[math.random(1,#musicIDs)]
-    s.Ended:Connect(function() s.SoundId = "rbxassetid://"..musicIDs[math.random(1,#musicIDs)] s:Play() end)
-
-    ts:Create(iT, TweenInfo.new(1.5), {TextTransparency = 0}):Play()
-    ts:Create(fill, TweenInfo.new(4, Enum.EasingStyle.Sine), {Size = UDim2.new(1, 0, 1, 0)}):Play()
-    task.wait(4.5); iG:Destroy(); ksG.Enabled = true
-end)
-
--- // MAIN PERSISTENT LOOP //
-task.spawn(function()
-    while task.wait(0.1) do
-        pcall(function()
-            local char = p.Character or p.CharacterAdded:Wait()
-            local hum = char:WaitForChild("Humanoid")
-            local hrp = char:WaitForChild("HumanoidRootPart")
-            st.Text = string.format('Ping: %dms | FPS: %d | %s', math.floor(stats.Network.ServerStatsItem["Data Ping"]:GetValue()), math.floor(1/rs.RenderStepped:Wait()), FlagEmoji)
+            local char = p.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
             
-            if _G.Fast then hum.WalkSpeed = 100 end
-            if _G.Grab then 
-                for _, f in pairs({workspace:FindFirstChild("CoinsFolder"), workspace:FindFirstChild("SoulCoinsFolder")}) do 
-                    if f then for _, c in pairs(f:GetDescendants()) do if c.Name == "Moneda" or c.Name == "SoulCoin" then c.CFrame = hrp.CFrame end end end 
-                end 
-            end
-            if _G.Light then local l = hrp:FindFirstChild("L") or Instance.new("PointLight", hrp); l.Name, l.Range, l.Brightness = "L", 18, 6 end
-            if _G.Spin then hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(25), 0) end
-            if _G.Fling then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and v.Character:FindFirstChild("HumanoidRootPart") then
-                        local d = (hrp.Position - v.Character.HumanoidRootPart.Position).Magnitude
-                        if d < 12 then hrp.Velocity = Vector3.new(8e5, 8e5, 8e5) hrp.CFrame = v.Character.HumanoidRootPart.CFrame end
-                    end
+            if getnilinstances then
+                for _, v in next, getnilinstances() do
+                    if v.Name == "PoisonArea" then v:Destroy() end
                 end
             end
-            if _G.Esp then
-                for _, v in pairs(game.Players:GetPlayers()) do
-                    if v ~= p and v.Character and not v.Character:FindFirstChild("KyoEsp") then
-                        local hl = Instance.new("Highlight", v.Character); hl.Name = "KyoEsp"; hl.FillColor = PURPLE
+            
+            local playerGui = p:FindFirstChild("PlayerGui")
+            if playerGui then
+                local targets = {"AntiCampWarningGui", "Vignette", "VignetteCamp"}
+                for _, name in pairs(targets) do
+                    local ui = playerGui:FindFirstChild(name)
+                    if ui then ui:Destroy() end
+                end
+            end
+
+            local dt = rs.RenderStepped:Wait()
+            local fps = math.floor(1/dt)
+            local ping = math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())
+            l2.Text = string.format('<font color="%s">Ping: %dms</font> | <font color="%s">FPS: %d</font> | <font color="%s">User: @%s %s</font>', MAIN_COLOR_HEX, ping, MAIN_COLOR_HEX, fps, MAIN_COLOR_HEX, p.Name, STATUS_ICON)
+            
+            updateTracers()
+
+            if hrp then
+                local l = hrp:FindFirstChild("HantoL") or Instance.new("PointLight", hrp); l.Name = "HantoL"
+                l.Enabled, l.Range, l.Color, l.Brightness = auraActive, auraRanges[currentAuraIdx], MAIN_COLOR, 4 
+                
+                local tr = hrp:FindFirstChild("HantoTrail")
+                if not tr then
+                    local a0 = Instance.new("Attachment", hrp); a0.Name = "HantoA0"; a0.Position = Vector3.new(0, 1.2, 0)
+                    local a1 = Instance.new("Attachment", hrp); a1.Name = "HantoA1"; a1.Position = Vector3.new(0, -1.2, 0)
+                    tr = Instance.new("Trail", hrp); tr.Name = "HantoTrail"
+                    tr.Attachment0, tr.Attachment1 = a0, a1
+                    tr.Color = ColorSequence.new(MAIN_COLOR)
+                    tr.Lifetime = 0.5
+                end
+                tr.Enabled = trailActive
+                tr.WidthScale = NumberSequence.new(trailWidths[currentTrailIdx])
+                
+                if coinActive then
+                    local targetFolders = {workspace:FindFirstChild("CoinsFolder"), workspace:FindFirstChild("SoulCoinsFolder")}
+                    for _, folder in pairs(targetFolders) do
+                        if folder then
+                            for _, v in pairs(folder:GetDescendants()) do
+                                if v:IsA("BasePart") and (v.Name == "Moneda" or v.Name == "SoulCoin") then
+                                    v.Velocity = Vector3.zero
+                                    v.RotVelocity = Vector3.zero
+                                    v.CanCollide = false
+                                    v.CFrame = hrp.CFrame
+                                end
+                            end
+                        end
                     end
                 end
             end
         end)
+        task.wait(0.01)
     end
 end)
